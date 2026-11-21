@@ -15,7 +15,10 @@ version = 1.1.0
 # charset-normalizer 2.1.1 = pure Python (newer versions ship x86 binaries that break on Android).
 # yt-dlp-ejs = YouTube challenge-solver scripts used together with the JS runtime.
 # yt-dlp is NOT pinned on purpose: YouTube changes often and every build should get the newest fixes.
-requirements = python3,kivy,pyjnius,android,openssl,yt-dlp,yt-dlp-ejs,requests,urllib3,idna,charset-normalizer==2.1.1,certifi
+# Names use underscores on purpose: python-for-android only skips its own copy of a dependency when
+# the name matches with underscores. With "charset-normalizer" it also pulled PyPI's compiled Android
+# wheel and handed it to the PC's pip, which refused it and stopped the build.
+requirements = python3,kivy,pyjnius,android,openssl,yt_dlp,yt_dlp_ejs,requests,urllib3,idna,charset_normalizer==2.1.1,certifi
 
 orientation = portrait
 fullscreen = 0
