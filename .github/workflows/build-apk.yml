@@ -1,0 +1,134 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [main, "claude/**"]
+    paths-ignore: ["README.md"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: apk-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest yt-dlp
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - run: python -m pytest -q tests
+
+  build:
+    name: Build APK
+    needs: test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost \
+                      /usr/local/lib/node_modules /opt/hostedtoolcache/CodeQL || true
+          df -h /
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git zip unzip autoconf automake libtool libtool-bin pkg-config cmake ninja-build \
+            zlib1g-dev libncurses-dev libffi-dev libssl-dev libltdl-dev ccache patch file nasm
+
+      # ---------- FFmpeg + QuickJS for the phone (cached: rebuilt only when the script changes)
+      - name: Cache helper programs
+        id: helpers
+        uses: actions/cache@v4
+        with:
+          path: libs/arm64-v8a
+          key: helpers-arm64-${{ hashFiles('tools/build_helpers.sh') }}
+
+      - name: Build FFmpeg + QuickJS (arm64)
+        if: steps.helpers.outputs.cache-hit != 'true'
+        run: bash tools/build_helpers.sh libs/arm64-v8a
+
+      - name: Show helper programs
+        run: ls -l libs/arm64-v8a
+
+      # ---------- Same signing key on every build, so updates install over the old app
+      - name: Restore debug signing key
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: debug-keystore-v1
+
+      - name: Create debug signing key (first build only)
+        run: |
+          mkdir -p ~/.android
+          if [ ! -f ~/.android/debug.keystore ]; then
+            keytool -genkeypair -v -keystore ~/.android/debug.keystore -storepass android \
+              -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+            echo "NEW_KEYSTORE=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Save debug signing key
+        if: env.NEW_KEYSTORE == '1'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: debug-keystore-v1
+
+      # ---------- Buildozer
+      - name: Cache Android SDK / NDK
+        uses: actions/cache@v4
+        with:
+          path: ~/.buildozer
+          key: buildozer-home-${{ hashFiles('buildozer.spec') }}
+          restore-keys: buildozer-home-
+
+      - name: Install Buildozer
+        run: pip install --upgrade pip && pip install buildozer==1.6.0 "cython<3.2" setuptools virtualenv
+
+      - name: Build APK
+        run: |
+          set +e +o pipefail
+          yes | buildozer -v android debug 2>&1 | tee build.log
+          status=${PIPESTATUS[1]}
+          exit $status
+
+      - name: Check the helpers are inside the APK
+        run: |
+          APK=$(ls bin/*.apk | head -1)
+          unzip -l "$APK" | grep -E "lib/arm64-v8a/lib(ffmpeg|qjs)\.so"
+          mv "$APK" "bin/YTDownloader-${{ github.run_number }}.apk"
+          ls -lh bin
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: YTDownloader-apk
+          path: bin/*.apk
+          if-no-files-found: error
+
+      - name: Upload build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
